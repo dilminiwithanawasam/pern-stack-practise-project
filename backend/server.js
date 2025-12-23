@@ -3,56 +3,90 @@ import helmet from "helmet";
 import morgan from "morgan";
 import cors from "cors";
 import dotenv from "dotenv";
+import path from "path";
+
+import productRoutes from "./routes/productRoutes.js";
 import { sql } from "./config/db.js";
 import { aj } from "./lib/arcjet.js";
-import productRoutes from "./routes/productRoutes.js";
 
 dotenv.config();
-const app = express();
-app.use(express.json());
-app.use(cors());//cors is a node.js package for providing a Connect/Express middleware that can be used to enable CORS with various options.
-app.use(helmet());//helmet is a security middleware that helps you protect your app by setting various HTTP headers.
-app.use(morgan("dev"));//morgan is a HTTP request logger middleware for node.js
-const PORT = process.env.PORT || 5000;
-//apply arcjet rate-limit ti all routes
-app.use(async(req,res,next)=>{
-    try{
-        const decision = await aj.protect(req, {
-            requested:1//specifies that each request consumes 1 token
-        })
-        if(decision.isDenied()){
-            if(decision.reason.isRateLimit()){
-                res.status(429).json({
-                    error:"Too Many Requests",
-                })
-            }
-        }
-       
-    }catch{
-        res.status(500).json({message:"Internal Server Error"});
 
+const app = express();
+const PORT = process.env.PORT || 3000;
+const __dirname = path.resolve();
+
+app.use(express.json());
+app.use(cors());
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+  })
+); // helmet is a security middleware that helps you protect your app by setting various HTTP headers
+app.use(morgan("dev")); // log the requests
+
+// apply arcjet rate-limit to all routes
+app.use(async (req, res, next) => {
+  try {
+    const decision = await aj.protect(req, {
+      requested: 1, // specifies that each request consumes 1 token
+    });
+
+    if (decision.isDenied()) {
+      if (decision.reason.isRateLimit()) {
+        res.status(429).json({ error: "Too Many Requests" });
+      } else if (decision.reason.isBot()) {
+        res.status(403).json({ error: "Bot access denied" });
+      } else {
+        res.status(403).json({ error: "Forbidden" });
+      }
+      return;
     }
-})
+
+    // check for spoofed bots
+    if (decision.results.some((result) => result.reason.isBot() && result.reason.isSpoofed())) {
+      res.status(403).json({ error: "Spoofed bot detected" });
+      return;
+    }
+
+    next();
+  } catch (error) {
+    console.log("Arcjet error", error);
+    next(error);
+  }
+});
+
 app.use("/api/products", productRoutes);
 
-async function initDB(){
-    try {
-      await sql`
-        CREATE TABLE IF NOT EXISTS products (
-          id SERIAL PRIMARY KEY,
-          name VARCHAR(100) NOT NULL,
-          image VARCHAR(255) NOT NULL,
-          price DECIMAL(10, 2) NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-      `; 
-        console.log("Database connected and ensured products table exists."); 
-    } catch (error) {
-        console.error("Database connection failed:", error);
-        
-    }
+if (process.env.NODE_ENV === "production") {
+  // server our react app
+  app.use(express.static(path.join(__dirname, "/frontend/dist")));
+
+  // ✅ Use a Regular Expression (no quotes, just forward slashes)
+app.get(/.*/, (req, res) => {
+  res.sendFile(path.resolve(__dirname, "frontend", "dist", "index.html"));
+});
 }
+
+async function initDB() {
+  try {
+    await sql`
+      CREATE TABLE IF NOT EXISTS products (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        image VARCHAR(255) NOT NULL,
+        price DECIMAL(10, 2) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+
+    console.log("Database initialized successfully");
+  } catch (error) {
+    console.log("Error initDB", error);
+  }
+}
+
 initDB().then(() => {
-    console.log("Server is running on port", PORT);
-    app.listen(PORT);
+  app.listen(PORT, () => {
+    console.log("Server is running on port " + PORT);
+  });
 });
